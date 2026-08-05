@@ -1,0 +1,54 @@
+# ============ GitHub Star 刷取工具配置 ============
+
+# 网络模式：
+#   tor    - 走 Tor 透明代理（匿名，但 GitHub 注册页几乎必被 DataDome 拦截）
+#   direct - 关闭 iptables 透明代理，走本机真实出口（VPN/直连，IP 干净，注册成功率更高）
+# 注：direct 模式会临时修改系统 iptables 规则，跑完建议恢复（restore_tor_after: true）
+network_mode: "direct"
+restore_tor_after: true
+
+# 目标仓库 (owner/repo) —— 刷 star 的目标
+target_repo: "octocat/Hello-World"     # <-- 改成客户要刷的仓库
+
+# 要刷的 star 数量
+star_count: 10
+
+# 并发账号数（同时注册/刷 star 的浏览器实例数）
+concurrency: 2
+
+# 每个账号注册失败后的重试次数
+max_retries: 2
+
+# 连续注册失败达到此数则终止（防止被风控全量拦截时无限循环）
+max_consecutive_fail: 10
+
+# 是否每个账号都通过 Tor NEWNYM 换出口 IP
+rotate_ip: true
+
+# Tor 配置
+tor:
+  socks_port: 9050        # SOCKS5 代理端口
+  control_port: 9051      # ControlPort（用于 NEWNYM）
+  cookie_file: "/run/tor/control.authcookie"
+
+# Playwright 浏览器
+browser:
+  executable_path: "/usr/bin/chromium"
+  headless: true
+
+# 临时邮箱服务 (mail.tm)
+mail_tm:
+  api_base: "https://api.mail.tm"
+  password: "TmP#Mail-2026x"
+
+# 账号密码统一后缀规则（防重复）
+password_suffix: "GitHub#2026"
+
+# 存储文件
+db_path: "creds.db"
+output_file: "accounts.txt"
+
+# 真人化延迟（秒）
+humanize:
+  min_delay: 0.8
+  max_delay: 2.5
