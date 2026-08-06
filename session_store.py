@@ -9,6 +9,7 @@
 import json
 import logging
 import os
+import re
 import time
 
 logger = logging.getLogger("star_farmer.session")
@@ -22,7 +23,9 @@ class SessionStore:
         os.makedirs(dir_path, exist_ok=True)
 
     def _path(self, username):
-        safe = username.replace("/", "_").replace("\\", "_")
+        # 缺陷 #22：路径穿越防护——只保留安全字符
+        safe = re.sub(r"[^a-zA-Z0-9._-]", "_", username)
+        safe = safe.strip(".")
         return os.path.join(self.dir_path, f"{safe}.json")
 
     def load(self, username):

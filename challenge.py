@@ -108,7 +108,7 @@ def _classify_datadome(page, frame_url, html=None):
         kind = "silent"
     elif "slider" in lowered or "slide" in lowered or "verify you are human" in lowered:
         kind = "slider"
-    elif "select" in lowered or "click" in lowered and "image" in lowered:
+    elif "select" in lowered or ("click" in lowered and "image" in lowered):
         kind = "pick"
     elif "type" in lowered and "character" in lowered:
         kind = "text"

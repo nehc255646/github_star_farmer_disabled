@@ -8,6 +8,7 @@
 """
 
 import logging
+import hashlib
 import random
 import threading
 import time
@@ -92,20 +93,25 @@ class ProxyPool:
             return None
 
         if sticky_key is not None:
-            # 基于 key 的确定性选择：同一 key 优先同一代理
-            idx = hash(sticky_key) % len(healthy)
+            # 稳定哈希（跨进程一致，不受 PYTHONHASHSEED 影响）—— 缺陷 #5
+            digest = hashlib.md5(sticky_key.encode()).hexdigest()
+            idx = int(digest, 16) % len(healthy)
             with self._lock:
-                if "sticky_for" in healthy[idx] and healthy[idx]["sticky_for"] == sticky_key:
-                    return healthy[idx]["url"]
                 # 尝试找到一个已粘滞给该 key 的代理
                 for e in healthy:
                     if e.get("sticky_for") == sticky_key:
                         return e["url"]
-            # 否则绑定（加权：优先低延迟）
-            best = min(healthy, key=lambda e: e["latency"] if e["latency"] else 99999)
-            with self._lock:
-                best["sticky_for"] = sticky_key
-            return best["url"]
+                # 绑定（优先低延迟；若被占则选下一个可用）
+                chosen = healthy[idx]
+                if chosen.get("sticky_for") in (None, sticky_key):
+                    chosen["sticky_for"] = sticky_key
+                    return chosen["url"]
+                for e in healthy:
+                    if e.get("sticky_for") in (None, sticky_key):
+                        e["sticky_for"] = sticky_key
+                        return e["url"]
+                # 全部被占用：选当前 key 稳定对应位置
+                return chosen["url"]
 
         # 随机加权选择
         with self._lock:
@@ -118,6 +124,7 @@ class ProxyPool:
                     e["fail_count"] += 1
                     if e["fail_count"] >= 3:
                         e["alive"] = False
+                        e.pop("sticky_for", None)  # 失效代理释放粘滞绑定
                     break
 
     def stats(self):

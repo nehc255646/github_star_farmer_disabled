@@ -94,23 +94,6 @@ def install_stealth(context, fp=None):
 
     // ============ Canvas 指纹混淆 ============
     try {{
-        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL = function (...args) {{
-            const result = origToDataURL.apply(this, args);
-            // 只对非空 canvas 做像素级扰动
-            try {{
-                const ctx = this.getContext('2d');
-                if (ctx && this.width > 0 && this.height > 0) {{
-                    const img = ctx.getImageData(0, 0, this.width, this.height);
-                    const noise = 0.5 + (Math.random() * 1.0);
-                    for (let i = 0; i < img.data.length; i += 16) {{
-                        img.data[i] = Math.min(255, Math.max(0, img.data[i] + noise));
-                    }}
-                    // 无需真正重绘，仅干扰哈希来源即可
-                }}
-            }} catch (e) {{}}
-            return result;
-        }};
         const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
         CanvasRenderingContext2D.prototype.getImageData = function (...args) {{
             const img = origGetImageData.apply(this, args);
@@ -121,6 +104,24 @@ def install_stealth(context, fp=None):
                 }}
             }}
             return img;
+        }};
+        // toDataURL 也做扰动：修改像素后写回再导出（缺陷修复：此前只读不写回无效）
+        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function (...args) {{
+            try {{
+                const ctx = this.getContext('2d');
+                if (ctx && this.width > 0 && this.height > 0) {{
+                    const img = ctx.getImageData(0, 0, this.width, this.height);
+                    if (img.data.length > 100) {{
+                        const noise = Math.floor(Math.random() * 2);
+                        for (let i = 0; i < img.data.length; i += 13) {{
+                            img.data[i] = Math.min(255, Math.max(0, img.data[i] + noise));
+                        }}
+                        ctx.putImageData(img, 0, 0);
+                    }}
+                }}
+            }} catch (e) {{}}
+            return origToDataURL.apply(this, args);
         }};
     }} catch (e) {{}}
 
@@ -160,8 +161,26 @@ def install_stealth(context, fp=None):
         if (document.fonts && document.fonts.check) {{
             const origCheck = document.fonts.check.bind(document.fonts);
             document.fonts.check = function (...args) {{
-                return true;
+                try {{
+                    const target = (args[0] || '').replace(/^\\d+(px|pt|em|rem)\\s/, '');
+                    if (target.includes('monospace') || target.includes('sans-serif') || target.includes('serif')) {{
+                        return true;
+                    }}
+                    return Math.random() > 0.05; // 绝大多数常见字体真实存在
+                }} catch (e) {{
+                    return true;
+                }}
             }};
+        }}
+    }} catch (e) {{}}
+
+    // ============ navigator.connection（缺失会漏指纹） ============
+    try {{
+        if (!navigator.connection) {{
+            Object.defineProperty(navigator, 'connection', {{
+                value: {{ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false }},
+                configurable: true,
+            }});
         }}
     }} catch (e) {{}}
 
@@ -205,7 +224,7 @@ def install_stealth(context, fp=None):
 
 def _default_ua():
     return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+            "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
 
 
 def _chrome_version(ua):
@@ -233,9 +252,12 @@ def make_fingerprint(rng=None):
         "Google Inc. (Intel)",
     ]
     ua_list = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        # 2026 年主流 Chrome 版本（与系统 Chromium 148 匹配，避免版本过时信号）
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     ]
     screen_sizes = [(1920, 1080), (2560, 1440), (1536, 864), (1440, 900), (1366, 768)]
     return {

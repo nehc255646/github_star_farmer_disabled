@@ -6,6 +6,9 @@
 # 注：direct 模式会临时修改系统 iptables 规则，跑完建议恢复（restore_tor_after: true）
 network_mode: "direct"
 restore_tor_after: true
+# Tor 透明代理切换脚本路径（可移植化，非作者环境请修改）
+torify_script: "/home/kali/Desktop/torify-all.sh"
+untorify_script: "/home/kali/Desktop/untorify.sh"
 
 # 外部代理池（住宅/ISP 代理）。留空则用本机网络。
 # 文件格式：每行一个代理，支持 http/socks5：
@@ -40,7 +43,7 @@ fill_profile: true
 
 # 是否注册后先"养号"（浏览主页/等待随机时长）再刷星
 cooldown_after_register: true
-cooldown_seconds: [10, 30]
+cooldown_seconds: [60, 180]
 
 # Tor 配置
 tor:

@@ -12,9 +12,7 @@
 import argparse
 import logging
 import sys
-import time
-
-from patchright.sync_api import sync_playwright
+from browser_api import sync_playwright
 from stealth import install_stealth, make_fingerprint
 from tor_control import TorControl, get_public_ip
 
@@ -64,6 +62,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max", type=int, default=30, help="最多探测的出口数")
     parser.add_argument("--wait", type=int, default=6, help="NEWNYM 后等待秒数")
+    parser.add_argument("--once", action="store_true", help="每个出口只判断一次（默认即一次）")
+    parser.add_argument("--timeout", type=int, default=15, help="单个出口页面加载超时（秒）")
     args = parser.parse_args()
 
     tor = TorControl()
@@ -77,7 +77,7 @@ def main():
         for i in range(args.max):
             tor.new_identity(wait=args.wait)
             ip = get_public_ip()
-            status, detail = check_one_exit(browser)
+            status, detail = check_one_exit(browser, timeout=args.timeout)
             results[status] = results.get(status, 0) + 1
             logger.info("[%d/%d] exit=%s status=%s detail=%s", i + 1, args.max, ip, status, detail)
             if status == "ok":

@@ -19,10 +19,11 @@ logger = logging.getLogger("check_ip")
 def get_ip(timeout=20):
     try:
         r = requests.get("https://check.torproject.org/api/ip", timeout=timeout)
-        return r.json().get("IP")
+        d = r.json()
+        return {"ip": d.get("IP"), "is_tor": bool(d.get("IsTor"))}
     except Exception as e:
         logger.error("IP 检测失败: %s", e)
-        return None
+        return {"ip": None, "is_tor": None}
 
 
 def get_ipinfo(ip, timeout=20):
@@ -58,7 +59,11 @@ def probe_signup(timeout=45):
             b.close()
             return f"页面打不开: {str(e)[:80]}"
         pg.wait_for_timeout(6000)
-        html = pg.evaluate("document.documentElement.outerHTML")
+        try:
+            html = pg.evaluate("document.documentElement.outerHTML")
+        except Exception as e:
+            b.close()
+            return f"页面状态异常（可能在挑战页）: {str(e)[:60]}"
         has_dd = "captcha-delivery" in html
         n_inputs = pg.locator("input:visible").count()
         # 读取 iframe 提示
@@ -83,13 +88,13 @@ def main():
     args = parser.parse_args()
 
     logger.info("检测当前出口 IP…")
-    ip = get_ip()
-    if not ip:
+    info = get_ip()
+    if not info["ip"]:
         logger.error("无法获取出口 IP，请检查网络")
         sys.exit(1)
-    info = get_ipinfo(ip)
-    logger.info("出口 IP: %s  (%s)", ip, info)
-    logger.info("是否 Tor: %s", "是" if ip in ["192.42.116.19", "171.25.193.39"] else "检测中")
+    ipinfo = get_ipinfo(info["ip"])
+    logger.info("出口 IP: %s  (%s)", info["ip"], ipinfo)
+    logger.info("是否 Tor: %s", "是" if info["is_tor"] else "否")
 
     if args.probe:
         logger.info("探测 GitHub 注册页…")

@@ -133,7 +133,8 @@ class MailTMClient:
         text = self.get_message_text(msg["id"])
         code = self.extract_verification_code(text)
         if code:
-            logger.info("GitHub 验证码: %s", code)
+            # 缺陷 #21：验证码不打明文日志，只记录长度
+            logger.info("GitHub 验证码已提取（长度 %d）", len(code))
             return code, text
         return None, text
 

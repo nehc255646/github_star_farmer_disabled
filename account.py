@@ -29,6 +29,7 @@ class AccountGenerator:
     ]
 
     def __init__(self, password_suffix="GitHub#2026"):
+        # 缺陷 #23：固定后缀可爆破，改为每个账号随机后缀（保留基础后缀作兼容）
         self.password_suffix = password_suffix
 
     def username(self, rng=None):
@@ -45,7 +46,9 @@ class AccountGenerator:
     def password(self, rng=None):
         rng = rng or random
         base = "".join(rng.choices(string.ascii_letters + string.digits, k=10))
-        return base + self.password_suffix
+        # 每个账号独立随机后缀，避免共享模式被爆破
+        extra = "".join(rng.choices(string.ascii_letters + string.digits + "!@#$%", k=6))
+        return base + self.password_suffix[:4] + extra
 
     def display_name(self, rng=None):
         rng = rng or random

@@ -11,7 +11,7 @@ import logging
 import random
 import time
 
-from playwright.sync_api import TimeoutError as PWTimeout
+from browser_api import TimeoutError as PWTimeout
 
 from challenge import ChallengeInfo, inspect_page
 from humanize import human_hover_click, human_mouse_move, human_type, human_pause, lognormal_delay
@@ -30,12 +30,14 @@ class ChallengeDetected(Exception):
 
 
 class Registrar:
-    def __init__(self, browser, email_factory, proxy=None, humanize=(0.8, 2.5), fingerprint=None):
+    def __init__(self, browser, email_factory, proxy=None, humanize=(0.8, 2.5),
+                 fingerprint=None, max_retries=2):
         self.browser = browser
         self.email_factory = email_factory  # 返回 MailTMClient 的可调用对象
         self.proxy = proxy
         self.min_delay, self.max_delay = humanize
         self.fingerprint = fingerprint
+        self.max_retries = max_retries
 
     def _delay(self):
         time.sleep(random.uniform(self.min_delay, self.max_delay))
@@ -93,6 +95,24 @@ class Registrar:
         email_addr / email_password 是 mail.tm 临时邮箱的凭证。
         返回注册成功后的登录页状态；若触发风控则抛 ChallengeDetected。
         """
+        last_err = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._register_once(username, password, email_addr, email_password)
+            except ChallengeDetected as e:
+                last_err = e
+                logger.warning("注册第 %d 次触发风控: %s", attempt + 1, e)
+                if attempt < self.max_retries:
+                    time.sleep(random.uniform(3, 8))
+            except Exception as e:
+                last_err = e
+                logger.warning("注册第 %d 次失败: %s", attempt + 1, e)
+                if attempt < self.max_retries:
+                    time.sleep(random.uniform(3, 8))
+        raise last_err
+
+    def _register_once(self, username, password, email_addr, email_password):
+        """单次注册流程（不重试）。"""
         ctx = self._new_context()
         page = ctx.new_page()
         # 网络层风控检测
@@ -100,7 +120,8 @@ class Registrar:
 
         def _on_response(resp):
             try:
-                if "captcha" in resp.url.lower() or "datadome" in str(resp.headers).lower():
+                h = {k.lower(): v.lower() for k, v in resp.headers.items()}
+                if "captcha" in resp.url.lower() or "datadome" in h.get("server", ""):
                     challenge_header["hit"] = True
             except Exception:
                 pass
@@ -108,7 +129,16 @@ class Registrar:
         page.on("response", _on_response)
         try:
             page.goto("https://github.com/signup", timeout=60000)
-            page.wait_for_timeout(5000)
+            # 缺陷 #13：动态等待挑战 iframe 加载完（最长 15s），而非硬编码 5s
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                info = self._check_challenge(page)
+                if info:
+                    break
+                # 若表单已渲染则无需等待
+                if page.locator("#email").count() > 0:
+                    break
+                page.wait_for_timeout(1000)
 
             info = self._check_challenge(page)
             if info or challenge_header["hit"]:
@@ -120,6 +150,7 @@ class Registrar:
             human_type(page, "#email", email_addr)
             page.keyboard.press("Enter")
             page.wait_for_timeout(3000)
+            self._check_form_error(page, "邮箱")
 
             after_email = self._check_challenge(page)
             if after_email:
@@ -131,6 +162,7 @@ class Registrar:
             human_type(page, "#password", password)
             page.keyboard.press("Enter")
             page.wait_for_timeout(3000)
+            self._check_form_error(page, "密码")
 
             # --- 第三步：用户名 ---
             user = page.locator("#login")
@@ -138,6 +170,7 @@ class Registrar:
             human_type(page, "#login", username)
             page.keyboard.press("Enter")
             page.wait_for_timeout(3000)
+            self._check_form_error(page, "用户名")
 
             # --- 第四步：邮箱验证码 ---
             # 从临时邮箱获取 GitHub 验证码
@@ -168,3 +201,23 @@ class Registrar:
             return True
         finally:
             ctx.close()
+
+    def _check_form_error(self, page, step):
+        """缺陷 #14：检查注册表单错误提示（用户名占用/邮箱无效等）。"""
+        try:
+            # GitHub 表单错误以 data-error 或错误文本展示
+            err = page.locator(
+                ".js-field-error, [data-error], .error, .is-error, #error, "
+                "input[aria-invalid='true']"
+            ).first
+            if err.count() > 0:
+                try:
+                    txt = err.inner_text(timeout=1500).strip()[:200]
+                except Exception:
+                    txt = err.get_attribute("data-error") or ""
+                if txt:
+                    raise RuntimeError(f"{step} 表单错误: {txt}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass

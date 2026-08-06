@@ -49,6 +49,8 @@ def is_slider_present(frame):
 def drag_slider(page, frame, rng=None):
     """模拟人类拖动滑块到目标位置。返回 True/False。"""
     rng = rng or random
+    # 计算 iframe 在主页面的偏移（缺陷 #3：iframe 内坐标需补偿）
+    offset_x, offset_y = _iframe_offset(page, frame)
     # 直接定位可拖动的 .slider 元素（class 恰为 "slider"，区别于 sliderbg/Mask/Target/Text）
     slider = frame.locator("div.slider").first
     sbox = slider.bounding_box()
@@ -57,11 +59,11 @@ def drag_slider(page, frame, rng=None):
     if not sbox or not tbox:
         raise SliderError("滑块/目标无边界框")
 
-    # 起点：滑块中心
-    start_x = sbox["x"] + sbox["width"] / 2
-    start_y = sbox["y"] + sbox["height"] / 2 + rng.uniform(-2, 2)
+    # 起点：滑块中心（iframe 内坐标 + 页面偏移）
+    start_x = sbox["x"] + sbox["width"] / 2 + offset_x
+    start_y = sbox["y"] + sbox["height"] / 2 + offset_y + rng.uniform(-2, 2)
     # 终点：目标中心（带小随机）
-    end_x = tbox["x"] + tbox["width"] / 2 + rng.uniform(-4, 4)
+    end_x = tbox["x"] + tbox["width"] / 2 + offset_x + rng.uniform(-4, 4)
     end_y = start_y + rng.uniform(-1.5, 1.5)
     dist = end_x - start_x
 
@@ -99,6 +101,28 @@ def drag_slider(page, frame, rng=None):
     page.mouse.up()
     logger.info("滑块拖动完成 (%.0fpx)", dist)
     return True
+
+
+def _iframe_offset(page, frame):
+    """计算 iframe 相对于主页面视口/文档的偏移 (x, y)。
+
+    DataDome 的 captcha iframe 是绝对定位铺满页面时偏移为 0，
+    但为稳妥起见仍计算 iframe 元素在主页面的 bounding box。
+    """
+    try:
+        # 找到主页面中指向该 frame 的 iframe 元素
+        for el in page.locator("iframe").all():
+            try:
+                content_frame = el.content_frame()
+                if content_frame and content_frame.url == frame.url:
+                    box = el.bounding_box()
+                    if box:
+                        return box["x"], box["y"]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return 0, 0
 
 
 def solve_datadome_slider(page, wait_after=6.0):

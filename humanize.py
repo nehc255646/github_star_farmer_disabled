@@ -36,8 +36,13 @@ def bezier_curve(p0, p1, p2, p3, steps):
 def human_mouse_move(page, x, y, rng=None):
     """模拟人类鼠标轨迹移动到 (x, y)。"""
     rng = rng or random
+    # 缺陷 #7：Playwright Python 的 mouse 没有 position 属性
+    # 用 evaluate 读取真实光标位置（跨坐标系，viewport 内），失败则随机起点
     try:
-        start = page.mouse.position or (rng.randint(200, 800), rng.randint(200, 500))
+        pos = page.evaluate("({x: window.__lastMouseX || 0, y: window.__lastMouseY || 0})")
+        start = (pos["x"] or rng.randint(200, 800), pos["y"] or rng.randint(200, 500))
+        if start == (0, 0):
+            start = (rng.randint(200, 800), rng.randint(200, 500))
     except Exception:
         start = (rng.randint(200, 800), rng.randint(200, 500))
 
@@ -70,6 +75,11 @@ def human_mouse_move(page, x, y, rng=None):
     for _ in range(rng.randint(1, 3)):
         page.mouse.move(x + rng.uniform(-2, 2), y + rng.uniform(-2, 2))
         time.sleep(rng.uniform(0.01, 0.03))
+    # 记录光标位置供下次调用（缺陷 #7）
+    try:
+        page.evaluate("({x: window.__lastMouseX = %f, y: window.__lastMouseY = %f})" % (x, y))
+    except Exception as e:
+        logger.debug("记录鼠标位置失败: %s", e)
 
 
 def human_hover_click(page, locator, rng=None):

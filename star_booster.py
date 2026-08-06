@@ -4,12 +4,16 @@ import logging
 import random
 import time
 
-from playwright.sync_api import TimeoutError as PWTimeout
+from browser_api import TimeoutError as PWTimeout
 
 from humanize import human_hover_click, human_mouse_move, human_type, human_pause
 from stealth import install_stealth, make_fingerprint
 
 logger = logging.getLogger("star_farmer.star")
+
+
+class SessionExpired(Exception):
+    """会话已失效（区别于网络超时，用于流程控制）。"""
 
 
 class StarBooster:
@@ -47,13 +51,14 @@ class StarBooster:
         human_type(page, "#login_field", username)
         human_type(page, "#password", password)
         human_hover_click(page, page.locator("input[type='submit'][name='commit']"))
-        # 等待登录跳转
-        try:
-            page.wait_for_url("https://github.com/**", timeout=45000)
-        except PWTimeout:
-            pass
-        page.wait_for_timeout(3000)
-        if "/login" in page.url or "Incorrect username or password" in page.content():
+        page.wait_for_timeout(4000)
+        url = page.url
+        body = page.content()
+        # 缺陷 #11：2FA 检测
+        if any(k in (url + body).lower() for k in ("two-factor", "two factor", "authentication code",
+                                                   "security code", "2fa", "otp")):
+            raise RuntimeError(f"账号开启了两步验证(2FA)，需要人工介入: {username}")
+        if "/login" in url or "Incorrect username or password" in body:
             raise RuntimeError(f"登录失败: {username}")
         logger.info("登录成功: %s", username)
 
@@ -96,16 +101,19 @@ class StarBooster:
         self._delay()
         page.wait_for_timeout(2500)
 
-        # 校验：按钮 aria/文本应变为 Unstar / Starred
-        try:
-            new_label = (star_btn.get_attribute("aria-label") or "") + " " + (star_btn.inner_text() or "")
-            if "unstar" in new_label.lower() or "starred" in new_label.lower():
-                logger.info("Star 成功 ✓")
-                return True
-        except Exception:
-            pass
-        logger.info("Star 已点击（状态待确认）")
-        return True
+        # 缺陷 #12：确认 Star 状态（轮询按钮变化，避免"状态待确认"假成功）
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                new_label = (star_btn.get_attribute("aria-label") or "") + " " + (star_btn.inner_text() or "")
+                if "unstar" in new_label.lower() or "starred" in new_label.lower():
+                    logger.info("Star 成功 ✓")
+                    return True
+            except Exception:
+                pass
+            time.sleep(1.5)
+        # 二次确认：star 计数是否 +1（通过 stargazers 数对比过于复杂，用按钮状态兜底）
+        raise RuntimeError(f"Star 状态未确认（按钮未变为 Unstar）: {owner_repo}")
 
     def run(self, username, password, owner_repo, session_store=None, session_data=None):
         """完整流程：登录 → star → 返回结果。"""
@@ -127,9 +135,9 @@ class StarBooster:
                 page.wait_for_timeout(2500)
                 # 若跳转到了登录页，说明 Cookie 失效，重新登录
                 if "/login" in page.url or "Sign in" in page.title():
-                    raise PWTimeout("session expired")
+                    raise SessionExpired("session expired")
                 result = self.star_repo(page, owner_repo, already_loaded=True)
-            except PWTimeout:
+            except SessionExpired:
                 self.login(page, username, password)
                 result = self.star_repo(page, owner_repo)
             # 保存会话

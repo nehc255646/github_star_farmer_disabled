@@ -6,6 +6,7 @@
 """
 
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger("star_farmer.network")
@@ -16,6 +17,9 @@ UNTORIFY_SCRIPT = "/home/kali/Desktop/untorify.sh"
 
 def _run(script):
     """以 sudo 运行脚本。"""
+    if not script or not os.path.exists(script):
+        logger.error("网络切换脚本不存在: %s", script)
+        return False
     logger.info("执行网络切换脚本: %s", script)
     try:
         r = subprocess.run(
@@ -51,12 +55,13 @@ def is_tor_transparent_active():
         return False
 
 
-def enable_direct():
+def enable_direct(torify_script=None, untorify_script=None):
     """关闭 Tor 透明代理，恢复直连（走本机 VPN/出口）。"""
+    untorify = untorify_script or UNTORIFY_SCRIPT
     if not is_tor_transparent_active():
         logger.info("当前已是直连模式，无需切换")
         return True
-    ok = _run(UNTORIFY_SCRIPT)
+    ok = _run(untorify)
     # 验证
     if ok and not is_tor_transparent_active():
         logger.info("已切换到直连模式（VPN/本机出口）")
@@ -65,12 +70,13 @@ def enable_direct():
     return ok
 
 
-def enable_tor():
+def enable_tor(torify_script=None, untorify_script=None):
     """恢复 Tor 透明代理（所有流量走 Tor）。"""
+    torify = torify_script or TORIFY_SCRIPT
     if is_tor_transparent_active():
         logger.info("当前已是 Tor 模式，无需切换")
         return True
-    ok = _run(TORIFY_SCRIPT)
+    ok = _run(torify)
     if ok and is_tor_transparent_active():
         logger.info("已恢复 Tor 透明代理")
         return True

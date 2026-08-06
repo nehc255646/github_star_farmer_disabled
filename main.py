@@ -17,7 +17,7 @@ import sys
 import time
 
 import yaml
-from playwright.sync_api import sync_playwright
+from browser_api import sync_playwright, engine as browser_engine
 
 from account import AccountGenerator, AccountStore
 from email_client import MailTMClient
@@ -35,6 +35,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("star_farmer.main")
+logger.info("浏览器驱动: %s", browser_engine())
 
 # 全局停止标志（优雅停机）
 STOP = {"flag": False}
@@ -49,9 +50,64 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
+_NET_CFG = {}
+
+
+def _guard_network(cfg):
+    """注册网络恢复兜底：崩溃/退出时自动恢复 Tor 透明代理，避免 iptables 残留断网。"""
+    _NET_CFG.update({
+        "restore": cfg.get("restore_tor_after", False) and cfg.get("network_mode") == "direct",
+        "torify_script": cfg.get("torify_script"),
+        "untorify_script": cfg.get("untorify_script"),
+    })
+    if _NET_CFG["restore"]:
+        try:
+            import atexit
+            atexit.register(_restore_network_on_exit)
+            logger.info("已注册网络恢复兜底（异常退出时自动恢复 Tor）")
+        except Exception as e:
+            logger.warning("注册网络兜底失败: %s", e)
+
+
+def _restore_network_on_exit():
+    """进程退出（含崩溃/信号）时恢复 Tor，避免 iptables 残留。"""
+    if _NET_CFG.get("restore"):
+        try:
+            logger.warning("进程退出，恢复 Tor 透明代理…")
+            net_switch.enable_tor(
+                torify_script=_NET_CFG.get("torify_script"),
+                untorify_script=_NET_CFG.get("untorify_script"),
+            )
+        except Exception as e:
+            logger.error("网络恢复失败: %s", e)
+
+
 def load_config(path):
-    with open(path) as f:
-        return yaml.safe_load(f)
+    """加载配置，带容错与默认值（缺陷：缺失配置直接 traceback）。"""
+    if not os.path.exists(path):
+        logger.error("配置文件不存在: %s（请检查路径或复制 config.example.yaml）", path)
+        sys.exit(1)
+    try:
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        logger.error("配置文件解析失败: %s", e)
+        sys.exit(1)
+    # 默认值兜底，避免 KeyError
+    cfg.setdefault("target_repo", "octocat/Hello-World")
+    cfg.setdefault("star_count", 10)
+    cfg.setdefault("concurrency", 1)
+    cfg.setdefault("max_retries", 2)
+    cfg.setdefault("max_consecutive_fail", 10)
+    cfg.setdefault("rotate_ip", True)
+    cfg.setdefault("db_path", "creds.db")
+    cfg.setdefault("output_file", "accounts.txt")
+    cfg.setdefault("browser", {"executable_path": "/usr/bin/chromium", "headless": True})
+    cfg.setdefault("humanize", {"min_delay": 0.8, "max_delay": 2.5})
+    cfg.setdefault("mail_tm", {"api_base": "https://api.mail.tm", "password": "TmP#Mail-2026x"})
+    cfg.setdefault("tor", {"socks_port": 9050, "control_port": 9051,
+                           "cookie_file": "/run/tor/control.authcookie"})
+    return cfg
 
 
 def read_account_file(path):
@@ -89,11 +145,17 @@ def resolve_network(cfg):
 
     if mode == "direct":
         logger.info("网络模式: DIRECT（关闭 iptables 透明代理，走本机 VPN/真实出口）")
-        net_switch.enable_direct()
+        net_switch.enable_direct(
+            torify_script=cfg.get("torify_script"),
+            untorify_script=cfg.get("untorify_script"),
+        )
         return None, False
 
     logger.info("网络模式: TOR（透明代理，匿名；注册页可能被 DataDome 拦截）")
-    net_switch.enable_tor()
+    net_switch.enable_tor(
+        torify_script=cfg.get("torify_script"),
+        untorify_script=cfg.get("untorify_script"),
+    )
     return "socks5://127.0.0.1:9050", True
 
 
@@ -101,16 +163,22 @@ def restore_network(cfg):
     """任务结束后按配置恢复网络。"""
     if cfg.get("restore_tor_after") and cfg.get("network_mode") == "direct" and not cfg.get("proxy"):
         logger.info("任务结束，恢复 Tor 透明代理…")
-        net_switch.enable_tor()
+        net_switch.enable_tor(
+            torify_script=cfg.get("torify_script"),
+            untorify_script=cfg.get("untorify_script"),
+        )
 
 
-def register_account(cfg, registrar, gen, store):
-    """注册一个账号并存入数据库。返回 (username, email, success)。"""
+def register_account(cfg, registrar, gen, store, local_proxy=None):
+    """注册一个账号并存入数据库。返回 (username, email, success)。
+
+    local_proxy: 本账号粘滞的代理（邮箱链路与浏览器链路共用同一 IP）。
+    """
     username = gen.username()
     password = gen.password()
 
     # 创建临时邮箱
-    mail = MailTMClient(password=cfg["mail_tm"]["password"], proxy=cfg.get("proxy"))
+    mail = MailTMClient(password=cfg["mail_tm"]["password"], proxy=local_proxy or cfg.get("proxy"))
     try:
         addr = mail.create_account()
         store.add_pending(username, password, addr)
@@ -173,12 +241,14 @@ def mode_register_and_star(cfg):
             email_factory = make_email_factory(local_proxy, cfg["mail_tm"]["password"])
             fp = make_fingerprint()
             registrar = Registrar(browser, email_factory, proxy=local_proxy,
-                                  humanize=tuple(cfg["humanize"].values()), fingerprint=fp)
+                                  humanize=tuple(cfg["humanize"].values()), fingerprint=fp,
+                                  max_retries=cfg.get("max_retries", 2))
             booster = StarBooster(browser, proxy=local_proxy,
                                   humanize=tuple(cfg["humanize"].values()), fingerprint=fp)
             try:
-                uname, pw, addr, ok = register_account(cfg, registrar, gen, store)
+                uname, pw, addr, ok = register_account(cfg, registrar, gen, store, local_proxy=local_proxy)
                 if not ok:
+                    _mark_proxy_failed(pool_manager, local_proxy)
                     return False, "register_failed"
                 # 注册后冷却（养号第一步）
                 if cfg.get("cooldown_after_register"):
@@ -189,6 +259,7 @@ def mode_register_and_star(cfg):
                     store.mark_starred(uname)
                     return True, "starred"
                 store.update_status(uname, "star_failed", note=note)
+                _mark_proxy_failed(pool_manager, local_proxy)
                 return False, note
             finally:
                 browser.close()
@@ -311,6 +382,12 @@ def _assign_proxy(cfg, pool_manager, default_proxy, sticky_key=None):
     return default_proxy
 
 
+def _mark_proxy_failed(pool_manager, proxy_url):
+    """标记代理失败（缺陷 #6：让 mark_failed 真正生效）。"""
+    if pool_manager and proxy_url:
+        pool_manager.mark_failed(proxy_url)
+
+
 def main():
     parser = argparse.ArgumentParser(description="GitHub Star 刷取工具")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
@@ -330,6 +407,7 @@ def main():
         cfg["rotate_ip"] = False
     if args.network:
         cfg["network_mode"] = args.network
+    _guard_network(cfg)
 
     if args.accounts:
         accounts = read_account_file(args.accounts)
