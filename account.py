@@ -53,6 +53,32 @@ class AccountGenerator:
         last = rng.choice(["Lee", "Chen", "Smith", "Wang", "Brown", "Garcia", "Kim", "Miller", "Davis", "Lopez"])
         return f"{first} {last}"
 
+    def profile(self, rng=None):
+        """生成一套完整 GitHub 个人资料（头像/Bio/Location/公司/网址）。"""
+        rng = rng or random
+        bios = [
+            "Software engineer passionate about open source.",
+            "Full-stack developer | coffee enthusiast",
+            "Building things on the internet.",
+            "Lifelong learner. Code, music, and mountains.",
+            "Backend engineer. Rust & Go.",
+            "Student, developer, dreamer.",
+            "Frontend dev. Design systems and accessibility.",
+        ]
+        locations = ["San Francisco, CA", "Seattle, WA", "Austin, TX", "New York, NY",
+                     "Toronto, Canada", "London, UK", "Berlin, Germany", "Tokyo, Japan",
+                     "Singapore", "Melbourne, Australia", "Vancouver, Canada", "Portland, OR"]
+        companies = ["", "", "", "Acme Inc.", "Globex", "Initech", "Umbrella Corp",
+                     "Stark Industries", "Wayne Enterprises", "Hooli"]
+        sites = ["", "", "https://dev.to/" + self.username(rng), "https://github.com/" + self.username(rng)]
+        return {
+            "name": self.display_name(rng),
+            "bio": rng.choice(bios),
+            "location": rng.choice(locations),
+            "company": rng.choice(companies),
+            "website": rng.choice(sites),
+        }
+
 
 class AccountStore:
     """SQLite 存储：记录注册进度与账号凭证。"""
@@ -67,6 +93,9 @@ class AccountStore:
         status      TEXT DEFAULT 'pending',   -- pending/registered/starred/failed
         star_time   REAL,
         ip          TEXT,
+        profile     TEXT,                     -- JSON: 姓名/bio/地点/公司/网站
+        proxy       TEXT,                     -- 粘滞代理
+        session_file TEXT,                    -- 会话文件路径
         note        TEXT
     );
     """
@@ -99,6 +128,21 @@ class AccountStore:
                 (status, ip, note, username),
             )
             self.conn.commit()
+
+    def save_profile(self, username, profile, proxy=None):
+        """保存完整 profile（JSON 序列化）与粘滞代理。"""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE accounts SET profile=?, proxy=COALESCE(?, proxy) WHERE username=?",
+                (json.dumps(profile, ensure_ascii=False), proxy, username),
+            )
+            self.conn.commit()
+
+    def get(self, username):
+        with self._lock:
+            cur = self.conn.execute("SELECT * FROM accounts WHERE username=?", (username,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     def mark_starred(self, username, star_time=None):
         with self._lock:

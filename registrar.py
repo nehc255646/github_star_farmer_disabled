@@ -1,7 +1,10 @@
 """GitHub 账号注册器：使用 Playwright 自动化注册，支持代理池与风控检测。
 
-注意：GitHub 的 /signup 页面受 DataDome 保护，对 Tor 出口 IP 几乎全部拦截。
-建议使用住宅/数据中心代理池（见 config.yaml 的 proxy_pool 配置）。
+集成：
+- stealth 指纹对抗（Canvas/WebGL/Audio/Fonts/UA 等）
+- humanize 人类化行为（贝塞尔鼠标、打字、悬停）
+- challenge 增强风控检测（JS 对象、响应头、挑战分类）
+- session_store 会话持久化（Cookie 复用）
 """
 
 import logging
@@ -10,58 +13,79 @@ import time
 
 from playwright.sync_api import TimeoutError as PWTimeout
 
+from challenge import ChallengeInfo, inspect_page
+from humanize import human_hover_click, human_mouse_move, human_type, human_pause, lognormal_delay
+from stealth import install_stealth, make_fingerprint
+from slider import solve_datadome_slider, is_slider_present
+
 logger = logging.getLogger("star_farmer.registrar")
 
 
 class ChallengeDetected(Exception):
     """DataDome 等风控验证被触发。"""
 
+    def __init__(self, info: ChallengeInfo = None, message="风控挑战被触发"):
+        super().__init__(message)
+        self.info = info
+
 
 class Registrar:
-    def __init__(self, browser, email_factory, proxy=None, humanize=(0.8, 2.5)):
+    def __init__(self, browser, email_factory, proxy=None, humanize=(0.8, 2.5), fingerprint=None):
         self.browser = browser
         self.email_factory = email_factory  # 返回 MailTMClient 的可调用对象
         self.proxy = proxy
         self.min_delay, self.max_delay = humanize
+        self.fingerprint = fingerprint
 
     def _delay(self):
         time.sleep(random.uniform(self.min_delay, self.max_delay))
 
     def _new_context(self):
-        ua = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        )
+        # 指纹（若未指定则生成一套，保持一致性）
+        if not self.fingerprint:
+            self.fingerprint = make_fingerprint()
+        ua = self.fingerprint.get("user_agent")
         ctx_opts = {
             "locale": "en-US",
-            "viewport": {"width": 1366, "height": 900},
+            "viewport": {"width": self.fingerprint.get("screen_size", (1366, 900))[0],
+                         "height": self.fingerprint.get("screen_size", (1366, 900))[1]},
             "user_agent": ua,
         }
         if self.proxy:
             ctx_opts["proxy"] = {"server": self.proxy}
         ctx = self.browser.new_context(**ctx_opts)
-        ctx.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            window.chrome = {runtime: {}};
-            """
-        )
+        # 完整指纹注入
+        install_stealth(ctx, self.fingerprint)
         return ctx
 
     def _check_challenge(self, page):
-        """检测 DataDome 风控。返回 True 表示被拦截。"""
+        """增强风控检测。返回 ChallengeInfo 或 None。"""
+        info = inspect_page(page)
+        if info:
+            logger.warning("风控挑战: %s", info)
+        return info
+
+    def _handle_challenge(self, page, info):
+        """处理风控挑战：滑块自动解，其他类型抛异常。返回 True=已解决可继续。"""
+        # 若页面存在滑块，尝试自动解决
         try:
-            html = page.evaluate("document.documentElement.outerHTML")
-            if "captcha-delivery" in html:
-                return True
-            for f in page.frames:
-                if "captcha-delivery" in f.url:
-                    return True
-        except Exception:
-            return False
-        return False
+            has_slider = any(
+                "captcha-delivery" in fr.url and is_slider_present(fr)
+                for fr in page.frames
+            )
+            if has_slider:
+                logger.info("检测到 DataDome 滑块，尝试自动解决…")
+                ok = solve_datadome_slider(page, wait_after=8)
+                if ok:
+                    # 解决后重新检查是否还有风控
+                    after = self._check_challenge(page)
+                    if not after:
+                        logger.info("滑块解决成功，继续注册")
+                        return True
+                    logger.warning("滑块已解决但仍存在风控: %s", after)
+        except Exception as e:
+            logger.warning("滑块解决异常: %s", e)
+        raise ChallengeDetected(info=info, message="风控挑战无法自动解决")
 
     def register(self, username, password, email_addr, email_password):
         """注册一个 GitHub 账号。
@@ -71,36 +95,49 @@ class Registrar:
         """
         ctx = self._new_context()
         page = ctx.new_page()
+        # 网络层风控检测
+        challenge_header = {"hit": False}
+
+        def _on_response(resp):
+            try:
+                if "captcha" in resp.url.lower() or "datadome" in str(resp.headers).lower():
+                    challenge_header["hit"] = True
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
         try:
             page.goto("https://github.com/signup", timeout=60000)
-            page.wait_for_timeout(4000)
+            page.wait_for_timeout(5000)
 
-            if self._check_challenge(page):
-                raise ChallengeDetected("注册页被 DataDome 拦截")
+            info = self._check_challenge(page)
+            if info or challenge_header["hit"]:
+                self._handle_challenge(page, info)
 
             # --- 第一步：邮箱 ---
             email_input = page.locator("#email")
             email_input.wait_for(state="visible", timeout=30000)
-            email_input.fill(email_addr)
-            self._delay()
+            human_type(page, "#email", email_addr)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3000)
+
+            after_email = self._check_challenge(page)
+            if after_email:
+                self._handle_challenge(page, after_email)
 
             # --- 第二步：密码 ---
             pw = page.locator("#password")
             pw.wait_for(state="visible", timeout=20000)
-            pw.fill(password)
-            self._delay()
+            human_type(page, "#password", password)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3000)
 
             # --- 第三步：用户名 ---
             user = page.locator("#login")
             user.wait_for(state="visible", timeout=20000)
-            user.fill(username)
-            self._delay()
+            human_type(page, "#login", username)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3000)
 
             # --- 第四步：邮箱验证码 ---
             # 从临时邮箱获取 GitHub 验证码
@@ -112,8 +149,7 @@ class Registrar:
                 "input[inputmode='numeric'], #verification-code, input[name='verification_code'], input[autocomplete='one-time-code']"
             ).first
             code_input.wait_for(state="visible", timeout=20000)
-            code_input.fill(code)
-            self._delay()
+            human_type(page, code_input, code)
             page.keyboard.press("Enter")
 
             # 等待注册完成跳转

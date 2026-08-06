@@ -1,67 +1,79 @@
-# GitHub Star 刷取工具（已停用 / DISABLED）
+# GitHub Star 刷取工具（实验性存档，实战不可用）
 
-> ## 《本项目已停用》
+> ## ⚠️ 重要声明：本项目实战不可用，请勿用于生产或商业用途
 >
-> 经反复调试与实战验证，该方案**实际无法稳定工作**，故本仓库已停用并存档。
+> 1. **违反 GitHub 服务条款**：批量注册账号、虚假 Star 均违反 GitHub ToS，会导致账号封禁、仓库被风控标记，相关风险由使用者自行承担。
+> 2. **实战已证实不可行**：本项目经过反复调试与实测，注册链路受 DataDome 风控保护（TLS 指纹 + IP 信誉 + JS 指纹 + 行为分析多层评分），Tor / 机房 IP 几乎全部被拦截；即使使用住宅代理池，账号封禁率依然极高，无法稳定工作。
+> 3. **本仓库仅作技术实验存档**：代码保留了风控对抗相关的实验性实现（指纹、滑块、代理池等），仅供安全研究与学习参考，不构成任何可用性承诺。
 >
-> 停用原因：
-> 1. GitHub 注册页受 **DataDome** 风控，Tor / 机房 IP 几乎全部被拦截，住宅代理池成本高且封号率居高不下。
-> 2. 新号集中为同一仓库刷 Star 极易触发 GitHub 异常检测，导致账号连坐封禁、仓库被标记。
-> 3. 批量注册账号、虚假 Star 均违反 GitHub 服务条款，业务风险与法律风险由使用者自行承担。
->
-> **本仓库仅作历史存档，请勿用于生产或商业用途。**
+> 若需为开源项目获得关注，请走正规渠道：社区运营、技术内容推广、开源平台官方曝光等。
 
-## 历史说明（已废弃的旧文档）
+## 项目背景（历史）
 
-批量注册 GitHub 小号并给目标仓库刷 Star（或直接使用已有账号刷 Star）。
+本项目最初尝试批量注册 GitHub 小号并给目标仓库刷 Star（或使用已有账号刷 Star）。
+经过多轮加固（指纹对抗、行为模拟、代理池、会话持久化等），**实战结论仍是无法稳定工作**，原因：
 
-## 重要警告（务必阅读）
+- GitHub `/signup` 注册页部署 DataDome 高敏风控，**IP 信誉是第一变量**，Tor 出口 / 数据中心 IP 几乎必拦；
+- 新号集中为同一仓库刷 Star 极易触发异常检测，账号连坐封禁、仓库被标记；
+- 已有账号直接刷 Star（登录/仓库页不拦）相对可用，但同样违反 ToS，且账号来源本身就是风险。
 
-1. **违反 GitHub ToS**：批量注册账号、虚假 Star 均违反 GitHub 服务条款，轻则封号、重则仓库被标记/封禁。
-2. **DataDome 风控**：GitHub 的 `/signup` 注册页受 DataDome 保护，**对 Tor 出口 IP 几乎全部拦截**（本项目已实测）。
-   - 主站 / 登录页 / 仓库页**不受拦截**，因此"已有账号刷 Star"链路完全可用。
-   - 若确实需要批量注册，请准备**住宅代理池**（数据中心 IP 也很可能被拦）。
-3. **责任自负**：使用本工具产生的任何账号封禁、法律风险均由使用者自行承担。
+## 项目结构
+
+```
+main.py          # 主入口 + 并发调度（检查点续跑、优雅停机 SIGTERM）
+registrar.py     # 注册器（DataDome 检测、滑块自动解、邮箱验证码）
+star_booster.py  # 登录 + 刷 Star（会话复用）
+account.py       # 随机账号/Profile 生成 + SQLite 存储
+email_client.py  # mail.tm 临时邮箱客户端
+tor_control.py   # Tor NEWNYM 换 IP
+network.py       # 网络模式切换（Tor 透明代理 <-> 直连）
+stealth.py       # 浏览器指纹对抗（Canvas/WebGL/Audio/Fonts/UA/Client-Hints）
+humanize.py      # 人类化行为（贝塞尔鼠标、逐字打字、悬停、页面探索）
+challenge.py     # 风控检测（JS 对象、响应头、iframe、挑战分类）
+slider.py        # DataDome 滑块自动拖动
+proxy_pool.py    # 代理池（评分、存活检测、会话粘滞）
+session_store.py # Cookie/指纹/代理粘滞持久化
+check_ip.py      # 出口 IP 与注册页连通性检测
+tor_sweep.py     # Tor 出口批量探测（实验性）
+config.yaml      # 配置文件
+requirements.txt # 依赖锁定
+```
 
 ## 环境准备
 
 ```bash
-# 需要 Python 3.10+，Playwright 与系统 Chromium
 python3 -m venv venv
-./venv/bin/pip install playwright pyyaml requests pysocks stem
-# 修改 config.yaml 中 browser.executable_path 指向你的 chromium
+./venv/bin/pip install -r requirements.txt
 ```
 
-本项目已配置好 Tor（SOCKS5 9050 / ControlPort 9051）用于匿名与换 IP。
+浏览器：需系统装有 Chromium，并在 `config.yaml` 的 `browser.executable_path` 指定路径。
 
-## 使用方式
+## 使用方式（仅供研究，不保证可用）
 
-### 模式 B：已有账号直接刷 Star（推荐，稳定）
+### 模式 B：已有账号直接刷 Star
 
-准备账号文件 `accounts.txt`（Tab 分隔）：
+准备账号文件（Tab 分隔，`username<TAB>password<TAB>email`）：
 
 ```
-username1	password1	email1@x.com
-username2	password2	email2@x.com
+user1	pass1	user1@x.com
+user2	pass2	user2@x.com
 ```
-
-修改 `config.yaml` 里的 `target_repo`，然后：
 
 ```bash
 ./venv/bin/python main.py --accounts accounts.txt --repo owner/repo --count 10
 ```
 
-### 模式 A：注册新账号再刷 Star
+### 模式 A：注册新账号再刷 Star（实测基本无法成功）
 
 ```bash
 ./venv/bin/python main.py --config config.yaml
 ```
 
-> 默认走 Tor，注册页会被 DataDome 拦截而失败。如需尝试，请在 `config.yaml` 里配置代理池：
->
-> ```yaml
-> proxy: "http://user:pass@ip:port"   # 或 socks5://...
-> ```
+### 网络快速诊断
+
+```bash
+./venv/bin/python check_ip.py --probe   # 查出口 IP + 注册页是否被拦
+```
 
 ## 命令行参数
 
@@ -71,29 +83,16 @@ username2	password2	email2@x.com
 | `--accounts` | 已有账号文件，启用模式 B |
 | `--repo` | 覆盖目标仓库 owner/repo |
 | `--count` | 覆盖刷星数量 |
+| `--network tor\|direct` | 覆盖网络模式 |
 | `--no-rotate` | 不换 Tor IP |
 
 ## 数据存储
 
-- `creds.db`：SQLite 数据库，记录所有账号状态（pending/registered/starred/failed）。
-- `accounts.txt`：导出的账号清单。
-
-## 项目结构
-
-```
-main.py          # 主入口 + 调度器
-registrar.py     # 注册器（DataDome 检测、邮箱验证码）
-star_booster.py  # 登录 + 刷 Star
-account.py       # 随机账号生成 + SQLite 存储
-email_client.py  # mail.tm 临时邮箱客户端
-tor_control.py   # Tor NEWNYM 换 IP
-config.yaml      # 配置文件
-```
+- `creds.db`：SQLite，记录账号状态（pending/registered/starred/failed）。
+- `accounts.txt`：账号清单导出。
+- `sessions/`：每个账号的 Cookie/指纹/代理会话（自动生成）。
 
 ## 常见问题
 
 **注册总是失败/被拦截？**
-注册页被 DataDome 风控，Tor 出口 IP 信誉极差。请使用住宅代理池，或改用模式 B（已有账号）。
-
-**为什么用假账号测试 Star 模块时提示"登录失败"？**
-那是正常的——模块正确识别了错误凭证。用真实账号即可通过。
+正常。注册页受 DataDome 风控，Tor/数据中心 IP 信誉差，本工具实战不可用。请不要在生产环境尝试。

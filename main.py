@@ -3,12 +3,16 @@
 用法:
     python main.py --config config.yaml
     python main.py --accounts accounts.txt --repo owner/repo   # 已有账号直接刷星
+    python main.py --accounts accounts.txt --resume             # 续跑未完成账号
 """
 
 import argparse
 import concurrent.futures as cf
+import json
 import logging
+import os
 import random
+import signal
 import sys
 import time
 
@@ -21,12 +25,28 @@ from registrar import ChallengeDetected, Registrar
 from star_booster import StarBooster
 from tor_control import TorControl, get_public_ip
 import network as net_switch
+from proxy_pool import ProxyPool, load_proxies_from_file
+from session_store import SessionStore
+from stealth import make_fingerprint
+from challenge import inspect_page
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("star_farmer.main")
+
+# 全局停止标志（优雅停机）
+STOP = {"flag": False}
+
+
+def _handle_sigterm(signum, frame):
+    logger.warning("收到信号 %s，正在优雅停机…", signum)
+    STOP["flag"] = True
+
+
+signal.signal(signal.SIGINT, _handle_sigterm)
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def load_config(path):
@@ -115,10 +135,10 @@ def register_account(cfg, registrar, gen, store):
         return (username, password, addr, False)
 
 
-def star_with_account(cfg, booster, username, password):
+def star_with_account(cfg, booster, username, password, session_store=None, profile=None):
     """单个账号刷星。"""
     try:
-        done = booster.run(username, password, cfg["target_repo"])
+        done = booster.run(username, password, cfg["target_repo"], session_store=session_store)
         return (username, True, "done" if done else "already_starred")
     except Exception as e:
         logger.error("刷星失败 %s: %s", username, e)
@@ -131,6 +151,8 @@ def mode_register_and_star(cfg):
     store = AccountStore(cfg["db_path"])
     proxy, use_rotate = resolve_network(cfg)
     tor = TorControl(port=cfg["tor"]["control_port"], cookie_file=cfg["tor"]["cookie_file"])
+    session_store = SessionStore(cfg.get("session_dir", "sessions")) if cfg.get("session_dir") else None
+    pool_manager = _build_proxy_pool(cfg)
     need = cfg["star_count"]
     done_count = 0
     workers = max(1, cfg.get("concurrency", 1))
@@ -139,7 +161,9 @@ def mode_register_and_star(cfg):
 
     def worker(_):
         """单个 worker：自建浏览器，注册一个号并刷星。返回 (ok, note)。"""
-        local_proxy = proxy
+        if STOP["flag"]:
+            return False, "stopped"
+        local_proxy = _assign_proxy(cfg, pool_manager, proxy)
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=cfg["browser"]["headless"],
@@ -147,13 +171,20 @@ def mode_register_and_star(cfg):
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
             )
             email_factory = make_email_factory(local_proxy, cfg["mail_tm"]["password"])
-            registrar = Registrar(browser, email_factory, proxy=local_proxy, humanize=tuple(cfg["humanize"].values()))
-            booster = StarBooster(browser, proxy=local_proxy, humanize=tuple(cfg["humanize"].values()))
+            fp = make_fingerprint()
+            registrar = Registrar(browser, email_factory, proxy=local_proxy,
+                                  humanize=tuple(cfg["humanize"].values()), fingerprint=fp)
+            booster = StarBooster(browser, proxy=local_proxy,
+                                  humanize=tuple(cfg["humanize"].values()), fingerprint=fp)
             try:
                 uname, pw, addr, ok = register_account(cfg, registrar, gen, store)
                 if not ok:
                     return False, "register_failed"
-                st_ok, note = star_with_account(cfg, booster, uname, pw)[1:3]
+                # 注册后冷却（养号第一步）
+                if cfg.get("cooldown_after_register"):
+                    cmin, cmax = cfg.get("cooldown_seconds", [10, 30])
+                    time.sleep(random.uniform(cmin, cmax))
+                st_ok, note = star_with_account(cfg, booster, uname, pw, session_store=session_store)[1:3]
                 if st_ok:
                     store.mark_starred(uname)
                     return True, "starred"
@@ -164,10 +195,16 @@ def mode_register_and_star(cfg):
 
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
         while done_count < need:
+            if STOP["flag"]:
+                logger.warning("检测到停止信号，结束循环")
+                break
             if use_rotate and cfg.get("rotate_ip", True):
                 tor.new_identity(wait=2)
-            results = list(pool.map(worker, range(min(workers, need - done_count))))
+            batch = list(pool.map(worker, range(min(workers, need - done_count))))
+            results = [r for r in batch if r is not None]
             for ok, note in results:
+                if note == "stopped":
+                    continue
                 if ok:
                     done_count += 1
                     logger.info("进度: %d/%d star 完成", done_count, need)
@@ -194,13 +231,35 @@ def mode_existing_accounts(cfg, accounts):
     proxy = cfg.get("proxy") or (proxy if use_rotate else None)
     if not proxy and use_rotate:
         proxy = "socks5://127.0.0.1:9050"
-    for uname, pw, _ in accounts:
-        store.add_pending(uname, pw, "")
+    pool_manager = _build_proxy_pool(cfg)
+    session_store = SessionStore(cfg.get("session_dir", "sessions")) if cfg.get("session_dir") else None
+
+    # 检查点续跑：跳过已 starred 的账号
+    pending = []
+    for uname, pw, email in accounts:
+        existing = store.get(uname)
+        if existing and existing["status"] == "starred":
+            logger.info("跳过已完成账号: %s", uname)
+            continue
+        if existing and existing["status"] == "pending":
+            # 数据库中已有记录，续跑
+            store.add_pending(existing["username"], existing["password"], existing["email"])
+        else:
+            store.add_pending(uname, pw, email)
+        pending.append((uname, pw, email))
+
+    if not pending:
+        logger.info("所有账号均已完成，无需续跑")
+        store.export_txt(cfg["output_file"])
+        return
 
     workers = max(1, cfg.get("concurrency", 1))
 
     def worker(acc):
+        if STOP["flag"]:
+            return (acc[0], False, "stopped")
         uname, pw = acc[0], acc[1]
+        local_proxy = _assign_proxy(cfg, pool_manager, proxy, sticky_key=uname)
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=cfg["browser"]["headless"],
@@ -208,15 +267,19 @@ def mode_existing_accounts(cfg, accounts):
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
             )
             try:
-                booster = StarBooster(browser, proxy=proxy, humanize=tuple(cfg["humanize"].values()))
-                return star_with_account(cfg, booster, uname, pw)
+                fp = make_fingerprint()
+                booster = StarBooster(browser, proxy=local_proxy,
+                                      humanize=tuple(cfg["humanize"].values()), fingerprint=fp)
+                return star_with_account(cfg, booster, uname, pw, session_store=session_store)
             finally:
                 browser.close()
 
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(worker, accounts))
+        results = list(pool.map(worker, pending))
 
     for uname, ok, note in results:
+        if note == "stopped":
+            continue
         if ok:
             store.mark_starred(uname)
         else:
@@ -224,6 +287,28 @@ def mode_existing_accounts(cfg, accounts):
     store.export_txt(cfg["output_file"])
     logger.info("任务结束。状态统计: %s", store.count_by_status())
     restore_network(cfg)
+
+
+def _build_proxy_pool(cfg):
+    """根据配置构建代理池（若有代理文件）。"""
+    pool_file = cfg.get("proxy_pool_file")
+    if not pool_file or not os.path.exists(pool_file):
+        return None
+    proxies = load_proxies_from_file(pool_file)
+    if not proxies:
+        logger.warning("代理文件为空: %s", pool_file)
+        return None
+    logger.info("加载代理池: %d 个代理", len(proxies))
+    return ProxyPool(proxies, check_url=cfg.get("proxy_pool_check_url", "https://api.ipify.org?format=json"))
+
+
+def _assign_proxy(cfg, pool_manager, default_proxy, sticky_key=None):
+    """从代理池分配代理；无池则用默认代理。"""
+    if pool_manager:
+        p = pool_manager.get(sticky_key=sticky_key)
+        if p:
+            return p
+    return default_proxy
 
 
 def main():

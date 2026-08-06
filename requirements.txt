@@ -1,0 +1,9 @@
+# GitHub Star 刷取工具依赖
+# 安装：pip install -r requirements.txt
+
+patchright>=1.61          # 对抗 CDP 检测的 Playwright 分支（过 DataDome 关键）
+playwright>=1.55
+pyyaml>=6.0
+requests>=2.31
+PySocks>=1.7              # requests 走 SOCKS5 代理
+stem>=1.8                 # Tor ControlPort NEWNYM 换 IP

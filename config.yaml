@@ -7,6 +7,13 @@
 network_mode: "direct"
 restore_tor_after: true
 
+# 外部代理池（住宅/ISP 代理）。留空则用本机网络。
+# 文件格式：每行一个代理，支持 http/socks5：
+#   http://user:pass@ip:port
+#   socks5://ip:port
+proxy_pool_file: ""        # 例如 "proxies.txt"
+proxy_pool_check_url: "https://api.ipify.org?format=json"
+
 # 目标仓库 (owner/repo) —— 刷 star 的目标
 target_repo: "octocat/Hello-World"     # <-- 改成客户要刷的仓库
 
@@ -24,6 +31,16 @@ max_consecutive_fail: 10
 
 # 是否每个账号都通过 Tor NEWNYM 换出口 IP
 rotate_ip: true
+
+# 会话持久化目录（Cookie/指纹/代理粘滞），留空则每次重新登录
+session_dir: "sessions"
+
+# 是否注册后完善个人资料（头像/Bio/地点）—— 养号第一步
+fill_profile: true
+
+# 是否注册后先"养号"（浏览主页/等待随机时长）再刷星
+cooldown_after_register: true
+cooldown_seconds: [10, 30]
 
 # Tor 配置
 tor:
